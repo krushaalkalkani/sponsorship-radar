@@ -1,0 +1,11 @@
+duckdb==1.5.5
+fastapi
+uvicorn[standard]
+pydantic
+numpy
+rapidfuzz
+fastembed
+langgraph
+langchain-core
+langchain-anthropic
+anthropic

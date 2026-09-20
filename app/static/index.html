@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H-1B Sponsorship Radar</title>
+<style>
+:root{
+  --bg:#ffffff; --panel:#f7f8fa; --line:#e3e6ea; --ink:#12151a; --muted:#666f7a;
+  --accent:#1f5fd0; --good:#0f7a4d; --warn:#9a6300; --bad:#b1341f; --chip:#eef1f6;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#0f1115; --panel:#171a20; --line:#272c35; --ink:#e9ecf1; --muted:#98a1ae;
+  --accent:#6fa0ff; --good:#4ecb8d; --warn:#e0ad4a; --bad:#ff7a5e; --chip:#1e232b;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1040px;margin:0 auto;padding:24px 16px 80px}
+h1{font-size:22px;margin:0 0 2px;letter-spacing:-.02em}
+.sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:18px;flex-wrap:wrap}
+.tab{padding:9px 14px;cursor:pointer;border:0;background:none;color:var(--muted);font:inherit;font-weight:500;border-bottom:2px solid transparent}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+input,select,button,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+input,textarea{min-width:0}
+button.go{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;cursor:pointer}
+button.go:disabled{opacity:.5;cursor:default}
+.grow{flex:1 1 220px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:12px}
+.verdict{font-size:26px;font-weight:700;letter-spacing:-.02em;margin:0 0 2px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:14px 0}
+.kpi{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.kpi b{display:block;font-size:19px;letter-spacing:-.02em}
+.kpi span{color:var(--muted);font-size:11.5px;text-transform:uppercase;letter-spacing:.04em}
+.chip{display:inline-block;background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:12px;margin:0 6px 6px 0}
+.chip.good{color:var(--good);border-color:currentColor}
+.chip.warn{color:var(--warn);border-color:currentColor}
+.chip.bad{color:var(--bad);border-color:currentColor}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:left;padding:8px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;cursor:pointer;white-space:nowrap}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.bar{height:5px;background:var(--chip);border-radius:3px;overflow:hidden;min-width:44px}
+.bar i{display:block;height:100%;background:var(--accent)}
+.muted{color:var(--muted)}
+.small{font-size:12.5px}
+.trace{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--muted);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:10px;white-space:pre-wrap;word-break:break-word}
+.ans{white-space:pre-wrap}
+.ex{cursor:pointer;text-decoration:underline dotted;color:var(--accent)}
+.err{color:var(--bad)}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px}
+@keyframes s{to{transform:rotate(360deg)}}
+.note{border-left:3px solid var(--line);padding-left:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>H-1B Sponsorship Radar</h1>
+  <div class="sub" id="stats">loading…</div>
+
+  <div class="tabs">
+    <button class="tab on" data-p="company">Company check</button>
+    <button class="tab" data-p="shortlist">Build a target list</button>
+    <button class="tab" data-p="ask">Ask</button>
+  </div>
+
+  <!-- COMPANY -->
+  <div id="p-company">
+    <div class="row">
+      <input class="grow" id="cq" placeholder="Company name, e.g. Stripe, Mayo Clinic, Infosys" autocomplete="off">
+      <button class="go" id="cbtn">Check</button>
+    </div>
+    <div class="small muted" style="margin-bottom:12px">
+      Try: <span class="ex" data-c="Stripe">Stripe</span> ·
+      <span class="ex" data-c="Cognizant">Cognizant</span> ·
+      <span class="ex" data-c="University of Michigan">University of Michigan</span> ·
+      <span class="ex" data-c="Databricks">Databricks</span>
+    </div>
+    <div id="cout"></div>
+  </div>
+
+  <!-- SHORTLIST -->
+  <div id="p-shortlist" hidden>
+    <div class="row">
+      <input class="grow" id="srole" placeholder="Role, e.g. Software Developer, Data Scientist">
+      <input id="sstate" placeholder="State (CA)" style="width:110px" maxlength="2">
+      <input id="scity" placeholder="City" style="width:130px">
+      <input id="swage" type="number" placeholder="Min $" style="width:110px">
+    </div>
+    <div class="row">
+      <label class="small"><input type="checkbox" id="sexempt"> Cap-exempt only <span class="muted">(no lottery)</span></label>
+      <label class="small"><input type="checkbox" id="sstaff"> Exclude staffing firms</label>
+      <select id="ssort">
+        <option value="score">Sort: best bet</option>
+        <option value="volume">Sort: most hiring</option>
+        <option value="wage">Sort: highest pay</option>
+        <option value="recent">Sort: most recent</option>
+      </select>
+      <button class="go" id="sbtn">Search</button>
+    </div>
+    <div id="sout"></div>
+  </div>
+
+  <!-- ASK -->
+  <div id="p-ask" hidden>
+    <div class="row">
+      <input class="grow" id="aq" placeholder="Ask anything about sponsorship in this data">
+      <button class="go" id="abtn">Ask</button>
+    </div>
+    <div class="small muted" style="margin-bottom:12px">
+      Try: <span class="ex" data-a="Compare sponsorship at Stripe, Databricks and Snowflake for a new grad">compare 3 companies</span> ·
+      <span class="ex" data-a="Which cap-exempt employers in Massachusetts hire data scientists? I missed the lottery.">cap-exempt in MA</span> ·
+      <span class="ex" data-a="Which employers increased H-1B sponsorship the most from FY2024 to FY2025?">who is growing</span>
+    </div>
+    <div id="aout"></div>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmt=n=>n==null||n!==n?"—":Number(n).toLocaleString();
+const money=n=>n==null||n!==n?"—":"$"+Math.round(n).toLocaleString();
+
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
+  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on",x===t));
+  ["company","shortlist","ask"].forEach(p=>$("#p-"+p).hidden = p!==t.dataset.p);
+});
+document.querySelectorAll(".ex").forEach(e=>e.onclick=()=>{
+  if(e.dataset.c){ $("#cq").value=e.dataset.c; checkCompany(); }
+  if(e.dataset.a){ $("#aq").value=e.dataset.a; askAgent(); }
+});
+
+fetch("/api/stats").then(r=>r.json()).then(s=>{
+  $("#stats").innerHTML = `${fmt(s.lca_cases)} H-1B filings · ${fmt(s.perm_cases)} green-card cases · `
+    + `${fmt(s.employers)} employers · ${fmt(s.actionable)} actively hiring from outside · `
+    + `latest data ${esc(s.latest_quarter)}`
+    + (s.agent_enabled?"":` · <span class="err">agent off (no API key)</span>`);
+});
+
+// ---------- company ----------
+function signalChips(e){
+  let c="";
+  if(e.cap_exempt_likely) c+=`<span class="chip good">Cap-exempt — can sponsor outside the lottery</span>`;
+  if(e.h1b_dependent==="Yes") c+=`<span class="chip warn">H-1B dependent (staffing/consulting)</span>`;
+  if(e.willful_violator) c+=`<span class="chip bad">Flagged willful violator</span>`;
+  if(e.perm_certified>0) c+=`<span class="chip good">${fmt(e.perm_certified)} green cards certified</span>`;
+  else c+=`<span class="chip">No green-card filings</span>`;
+  if(e.last_fy>=2026) c+=`<span class="chip good">Filed in the latest quarter</span>`;
+  else if(e.last_fy<2025) c+=`<span class="chip warn">Nothing since FY${e.last_fy}</span>`;
+  return c;
+}
+function verdict(e){
+  const ro=e.recent_outside||0;
+  if(e.last_fy<2025) return ["Sponsored before, but not lately","var(--warn)"];
+  if(ro>=100) return ["Yes — sponsors at scale","var(--good)"];
+  if(ro>=20)  return ["Yes — sponsors regularly","var(--good)"];
+  if(ro>=5)   return ["Yes, but in small numbers","var(--warn)"];
+  if(ro>0)    return ["Rarely — a handful of outside hires","var(--warn)"];
+  return ["Files, but almost entirely renewals","var(--bad)"];
+}
+async function checkCompany(){
+  const q=$("#cq").value.trim(); if(!q) return;
+  $("#cout").innerHTML=`<div class="card"><span class="spin"></span> looking up…</div>`;
+  const e=await (await fetch("/api/company?name="+encodeURIComponent(q))).json();
+  if(!e.found){ $("#cout").innerHTML=`<div class="card">No employer matching <b>${esc(q)}</b> in the DOL data. Try the legal entity name.</div>`; return; }
+  const [v,col]=verdict(e);
+  const yrs=(e.by_year||[]).filter(y=>y.fy_year>=2023);
+  const mx=Math.max(1,...yrs.map(y=>y.outside_hires||0));
+  $("#cout").innerHTML=`
+  <div class="card">
+    <div class="muted small">${esc(e.display_name)}${e.hq_city?" · "+esc(e.hq_city)+", "+esc(e.hq_state):""}</div>
+    <p class="verdict" style="color:${col}">${v}</p>
+    <div>${signalChips(e)}</div>
+    <div class="kpis">
+      <div class="kpi"><b>${fmt(e.recent_outside)}</b><span>outside-hire positions, FY25+</span></div>
+      <div class="kpi"><b>${fmt(e.recent_filings)}</b><span>filings FY25+</span></div>
+      <div class="kpi"><b>${money(e.wage_median)}</b><span>median offered salary</span></div>
+      <div class="kpi"><b>${fmt(e.lca_total)}</b><span>filings all years</span></div>
+      <div class="kpi"><b>${e.score??"—"}</b><span>sponsorship score /100</span></div>
+    </div>
+    <div class="note small muted">Outside hires = new employment + change of employer. Renewals of existing
+      staff (${fmt(e.renewals)} positions here) don't help an outside applicant.</div>
+  </div>
+  <div class="card">
+    <b class="small">Outside-hire positions by fiscal year</b>
+    <table style="margin-top:8px"><tr><th>FY</th><th class="n">Filings</th><th class="n">Outside hires</th><th class="n">Renewals</th><th class="n">Median wage</th><th style="width:34%"></th></tr>
+    ${yrs.map(y=>`<tr><td>${y.fy_year}${y.fy_year==2026?' <span class="muted">(Q1 only)</span>':''}</td>
+      <td class="n">${fmt(y.filings)}</td><td class="n">${fmt(y.outside_hires)}</td>
+      <td class="n">${fmt(y.renewals)}</td><td class="n">${money(y.median_wage)}</td>
+      <td><div class="bar"><i style="width:${Math.round(100*(y.outside_hires||0)/mx)}%"></i></div></td></tr>`).join("")}
+    </table>
+  </div>
+  <div class="card">
+    <b class="small">Roles they sponsor</b>
+    <table style="margin-top:8px"><tr><th>Occupation</th><th>Example title</th><th class="n">Filings</th><th class="n">Median wage</th></tr>
+    ${(e.top_roles||[]).map(r=>`<tr><td>${esc(r.soc_title)}</td><td class="muted">${esc(r.example_title||"")}</td>
+      <td class="n">${fmt(r.filings)}</td><td class="n">${money(r.median_wage)}</td></tr>`).join("")}</table>
+  </div>
+  <div class="card">
+    <b class="small">Where the jobs are</b>
+    <table style="margin-top:8px"><tr><th>City</th><th>State</th><th class="n">Filings</th><th class="n">Median wage</th></tr>
+    ${(e.top_locations||[]).map(r=>`<tr><td>${esc(r.city)}</td><td>${esc(r.state)}</td>
+      <td class="n">${fmt(r.filings)}</td><td class="n">${money(r.median_wage)}</td></tr>`).join("")}</table>
+  </div>
+  ${(e.also_matching||[]).length?`<div class="card small"><b>Related entities</b><br>
+    ${e.also_matching.map(a=>`<span class="ex" onclick="document.querySelector('#cq').value=${JSON.stringify(a.display_name)};checkCompany()">${esc(a.display_name)}</span> <span class="muted">(${fmt(a.lca_total)})</span>`).join(" · ")}</div>`:""}`;
+}
+$("#cbtn").onclick=checkCompany; $("#cq").onkeydown=e=>e.key==="Enter"&&checkCompany();
+
+// ---------- shortlist ----------
+let lastRows=[], sortKey=null, sortDir=-1;
+function renderRows(){
+  const rows=lastRows;
+  if(!rows.length){ $("#sout").innerHTML=`<div class="card">Nothing matched. Loosen a filter — role words must appear in the job or occupation title.</div>`; return; }
+  const cols=[["display_name","Employer",0],["hq_state","State",0],
+    ["role_outside_hires","Outside hires (role)",1],["recent_outside","Outside hires (all)",1],
+    ["wage_median","Median wage",1],["perm_certified","Green cards",1],["score","Score",1]];
+  $("#sout").innerHTML=`<div class="card small muted">${rows.length} employers · outside hires = positions open to someone not already employed there</div>
+  <div class="card"><table><tr>${cols.map(c=>`<th class="${c[2]?"n":""}" data-k="${c[0]}">${c[1]}</th>`).join("")}<th>Signals</th></tr>
+  ${rows.map(r=>`<tr>
+    <td><span class="ex" onclick="document.querySelectorAll('.tab')[0].click();document.querySelector('#cq').value=${JSON.stringify(r.display_name)};checkCompany()">${esc(r.display_name)}</span></td>
+    <td>${esc(r.hq_state||"")}</td>
+    <td class="n">${fmt(r.role_outside_hires)}</td>
+    <td class="n">${fmt(r.recent_outside)}</td>
+    <td class="n">${money(r.wage_median)}</td>
+    <td class="n">${fmt(r.perm_certified)}</td>
+    <td class="n">${r.score??"—"}</td>
+    <td class="small">${r.cap_exempt_likely?'<span class="chip good">cap-exempt</span>':""}${r.h1b_dependent==="Yes"?'<span class="chip warn">staffing</span>':""}${r.willful_violator?'<span class="chip bad">violator</span>':""}</td>
+  </tr>`).join("")}</table></div>`;
+  document.querySelectorAll("#sout th[data-k]").forEach(th=>th.onclick=()=>{
+    const k=th.dataset.k; sortDir = sortKey===k ? -sortDir : -1; sortKey=k;
+    lastRows.sort((a,b)=>{const x=a[k],y=b[k];
+      if(typeof x==="string"||typeof y==="string") return sortDir*String(x??"").localeCompare(String(y??""));
+      return sortDir*((y??-1)-(x??-1));});
+    renderRows();
+  });
+}
+async function runShortlist(){
+  const p=new URLSearchParams();
+  const add=(k,v)=>{if(v!==""&&v!=null&&v!==false)p.set(k,v)};
+  add("role",$("#srole").value.trim()); add("state",$("#sstate").value.trim().toUpperCase());
+  add("city",$("#scity").value.trim()); add("min_wage",$("#swage").value);
+  if($("#sexempt").checked) add("cap_exempt",true);
+  if($("#sstaff").checked) add("exclude_staffing",true);
+  add("sort",$("#ssort").value); add("limit",50);
+  $("#sout").innerHTML=`<div class="card"><span class="spin"></span> searching…</div>`;
+  lastRows=await (await fetch("/api/shortlist?"+p)).json(); sortKey=null; renderRows();
+}
+$("#sbtn").onclick=runShortlist;
+["srole","sstate","scity","swage"].forEach(i=>$("#"+i).onkeydown=e=>e.key==="Enter"&&runShortlist());
+
+// ---------- ask ----------
+async function askAgent(){
+  const q=$("#aq").value.trim(); if(!q) return;
+  $("#abtn").disabled=true;
+  $("#aout").innerHTML=`<div class="card"><span class="spin"></span> the agent is querying the data…</div>`;
+  try{
+    const r=await (await fetch("/api/ask",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({question:q})})).json();
+    $("#aout").innerHTML = r.error
+      ? `<div class="card err">${esc(r.error)}</div>`
+      : `<div class="card"><div class="ans">${esc(r.answer)}</div>
+         ${r.trace&&r.trace.length?`<div class="trace">${r.trace.map(t=>"→ "+t.tool+"("+esc(JSON.stringify(t.args)).slice(0,220)+")").join("\n")}</div>`:""}</div>`;
+  }catch(e){ $("#aout").innerHTML=`<div class="card err">${esc(e)}</div>`; }
+  $("#abtn").disabled=false;
+}
+$("#abtn").onclick=askAgent; $("#aq").onkeydown=e=>e.key==="Enter"&&askAgent();
+</script>
+</body>
+</html>

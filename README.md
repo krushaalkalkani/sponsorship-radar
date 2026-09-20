@@ -1,0 +1,139 @@
+# H-1B Sponsorship Radar
+
+Answers one question fast, from real government data: **will this company sponsor me?**
+
+Built for F-1/OPT students. The FY2027 cap closed with ~211,600 registrations for 85,000
+slots and no second lottery, so the next shot is FY2028 (~March 2027). Between now and then
+the highest-leverage move is targeting employers who *actually* sponsor — which is public
+record, just scattered across DOL disclosure files nobody wants to open.
+
+## What it does
+
+**Company check** — type a name, get a verdict (`sponsors at scale` / `regularly` /
+`rarely` / `renewals only`), volume, recency, the roles they sponsor, where those jobs are,
+salary bands, and whether they also file green cards.
+
+**Target list** — role + state + salary floor → a ranked list of employers to actually apply
+to, with staffing firms filterable out and cap-exempt employers filterable in.
+
+**Ask** — natural language over the whole dataset, answered by a LangGraph agent that
+queries the data and shows which tools it called.
+
+## The distinction that makes it useful
+
+Most H-1B lookup sites report *total filings*. That number is misleading. A DOL filing is
+either:
+
+- **an outside hire** (`NEW_EMPLOYMENT` + `CHANGE_EMPLOYER`) — a job someone not already
+  at the company can get, or
+- **a renewal** (`CONTINUED_EMPLOYMENT` + `AMENDED_PETITION`) — an existing employee's
+  extension, which is worth nothing to an applicant.
+
+An employer with 4,000 renewals and 3 outside hires looks like a top sponsor on every other
+site and is a dead end in practice. This tool leads with outside hires everywhere.
+
+Two other signals it surfaces that matter and are rarely shown:
+
+- **Cap-exempt** (universities, hospitals) — they sponsor H-1B *outside the March lottery,
+  year round*. If you missed the cap, this is the single most actionable filter here.
+  Inferred from NAICS 61/622; it's a heuristic, not a legal determination.
+- **PERM green-card filings** — whether an employer takes people past H-1B to permanent
+  residency, i.e. whether the job is a path or a dead end.
+
+## Honest limits
+
+- An **LCA is not a visa.** It is step one of sponsoring. Employers file more LCAs than
+  people they hire, so position counts overstate actual hires. This is intent-to-sponsor
+  data, and the app says so.
+- LCA approval rate is ~99% and means nothing — the real filter is the USCIS lottery and
+  petition, which is not in this dataset.
+- **FY2026 contains Q1 only** (Oct–Dec 2025). The app labels it; don't compare it to a
+  full year.
+- Employers are keyed on normalized legal name. `Amazon.com Services LLC` and
+  `Amazon Web Services, Inc.` stay separate because they genuinely are. Search surfaces
+  related entities rather than silently merging them. (FEIN looked like a better key until
+  it turned out to group Amazon with an unrelated corporation and to lump every SUNY campus
+  and the NY Dept of Health under one number.)
+
+## Data
+
+| Source | Coverage | Rows |
+|---|---|---|
+| DOL LCA (H-1B/E-3/H-1B1) disclosure | FY2023 Q1 – FY2026 Q1 | 1,885,316 cases |
+| DOL PERM (green card) disclosure | FY2024 – FY2026 Q1 | 257,472 cases |
+
+Two things worth knowing if you extend this, both of which cost me time:
+
+1. The DOL LCA "Q4" file is **not** cumulative — it contains that quarter only. The PERM
+   Q4 file **is** cumulative. You need all four quarterly LCA files per fiscal year.
+2. Every xlsx has ~450k trailing blank rows. DuckDB's `read_xlsx` defaults to
+   `stop_at_empty=true`, which is correct here — but if you turn it off to be safe, you
+   get 79% phantom rows and every aggregate silently changes.
+
+## Architecture
+
+```
+DOL xlsx ──► ingest/build.py   per-case fact tables (DuckDB)
+             ingest/rollup.py  employer rollups + 0–100 score
+             ingest/embed.py   profile cards ──► int8 vector store
+                                    │
+FastAPI ──► app/db.py  (SQL + fuzzy + vector retrieval)
+        └─► app/agent.py  LangGraph: agent ⇄ tools ⇄ END
+                tools: lookup_company · shortlist_sponsors · compare_companies
+                       semantic_search · query_data (read-only SQL)
+```
+
+The agent is tool-bound and told never to state a number it didn't get from a tool, which
+is what stops it inventing sponsorship statistics. The read-only SQL tool is the escape
+hatch for questions the fixed tools don't cover ("who grew the most FY24→FY25").
+
+**Retrieval is hybrid on purpose.** Structured filters (role/state/wage) go to SQL because
+they're exact; open-ended descriptions ("biotech startups in San Diego") go to the vector
+store. At ~53k employer cards a brute-force int8 cosine scan takes ~5ms, so there is no ANN
+index — it would add a dependency and a build step to save nothing.
+
+## Scoring
+
+`score` is a transparent 0–100 blend, defined in `ingest/rollup.py`:
+
+| Weight | Signal |
+|---|---|
+| 35 | recent outside-hire volume (log-scaled) |
+| 25 | recent filing volume (log-scaled) |
+| 15 | outside-hire ratio vs renewals |
+| 10 | recency of last filing |
+| 8 | certified green-card cases |
+| 7 | cap-exempt |
+| −15 | willful violator |
+
+It's a ranking heuristic, not a probability. Don't read it as odds.
+
+## Run it
+
+```bash
+python -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+./scripts/rebuild.sh      # downloads ~1.4GB, builds everything (~20 min)
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+./scripts/run.sh          # http://127.0.0.1:8000
+```
+
+The data endpoints need no API key. Only `/api/ask` does, and it fails with a clear
+message rather than breaking the page.
+
+## API
+
+| Endpoint | |
+|---|---|
+| `GET /api/company?name=Stripe` | full sponsorship profile |
+| `GET /api/shortlist?role=Data+Scientist&state=MA&min_wage=120000&exclude_staffing=true` | ranked target list |
+| `GET /api/semantic?q=biotech+startups+that+sponsor` | vector search |
+| `POST /api/ask {"question": "..."}` | agent |
+| `GET /api/stats` | dataset coverage |
+
+## Deploy
+
+`render.yaml` + `Dockerfile` are set up for Render. The free tier doesn't have the RAM for
+the embedding model, so it targets `starter`. Set `ANTHROPIC_API_KEY` in the dashboard.
+
+Data is baked into the image (~270MB DuckDB, read-only), so there's no database service to
+run. To refresh, re-run `scripts/rebuild.sh` and redeploy.

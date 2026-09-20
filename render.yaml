@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: sponsorship-radar
+    runtime: docker
+    plan: starter          # free tier lacks the RAM for the embedding model
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false        # set this in the Render dashboard
