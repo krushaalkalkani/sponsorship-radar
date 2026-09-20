@@ -1,15 +1,3 @@
----
-title: H-1B Sponsorship Radar
-emoji: 🎯
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-app_port: 7860
-pinned: false
-license: mit
-short_description: Which US employers actually sponsor H-1B, from real DOL data
----
-
 # H-1B Sponsorship Radar
 
 Answers one question fast, from real government data: **will this company sponsor me?**
@@ -173,34 +161,18 @@ Runtime footprint is ~231MB resident, so the free tier of most hosts works.
 Semantic search calls the OpenAI embeddings API for the query rather than loading
 a local model — that choice is what keeps it under 512MB.
 
-### Render (recommended)
+### Render
 
-`render.yaml` + `Dockerfile` are ready. Render needs to be able to fetch the repo:
+Live at **https://sponsorship-radar.onrender.com** — `render.yaml` + `Dockerfile`
+drive it, auto-deploying on push to `main`.
 
-```bash
-gh repo edit --visibility public --accept-visibility-change-consequences
-```
+Render must be able to fetch the repo (public, or connect GitHub in the dashboard
+for a private one). Set `OPENAI_API_KEY` under **Environment**; it is never
+committed. Without it the data endpoints still work and `/api/ask` returns a clear
+503 instead of breaking the page.
 
-or connect your GitHub account in the Render dashboard to grant access to a
-private repo. Then create the service from the repo and set `OPENAI_API_KEY` in
-**Environment** (never commit it).
-
-Free-tier services sleep after ~15 min idle; the first request after that takes
-~50s to wake.
-
-### Hugging Face Spaces
-
-`scripts/deploy_hf.py` is written and working, but **Docker and Gradio Spaces now
-require a PRO subscription** — only Static Spaces are free, and a static Space
-cannot run this backend. If you have PRO:
-
-```bash
-export HF_TOKEN=hf_...
-python scripts/deploy_hf.py --space <user>/sponsorship-radar
-```
-
-It uploads over HF's HTTP API, so git-lfs isn't needed for the ~85MB database,
-and sets the LLM key as a Space secret.
+Free-tier services sleep after ~15 min idle and take ~50s to wake on the next
+request — worth warming before you show it to anyone.
 
 ### Data
 
