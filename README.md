@@ -169,16 +169,56 @@ message rather than breaking the page.
 
 ## Deploy
 
-Ships to Hugging Face Spaces (Docker SDK):
+Runtime footprint is ~231MB resident, so the free tier of most hosts works.
+Semantic search calls the OpenAI embeddings API for the query rather than loading
+a local model — that choice is what keeps it under 512MB.
+
+### Render (recommended)
+
+`render.yaml` + `Dockerfile` are ready. Render needs to be able to fetch the repo:
 
 ```bash
-export HF_TOKEN=hf_...     # write-scoped
-./.venv/bin/python scripts/deploy_hf.py --space <user>/sponsorship-radar
+gh repo edit --visibility public --accept-visibility-change-consequences
 ```
 
-Uploads over HF's HTTP API, so git-lfs isn't needed for the 79MB database. The LLM key
-is set as a Space *secret*, never committed. Spaces gives 16GB RAM, which matters —
-the embedding model pushes runtime memory to ~650MB, above Render's 512MB free tier.
+or connect your GitHub account in the Render dashboard to grant access to a
+private repo. Then create the service from the repo and set `OPENAI_API_KEY` in
+**Environment** (never commit it).
 
-Data is baked into the image (79MB DuckDB + 14MB vectors, read-only), so there is no
-database service to run. To refresh, re-run `scripts/rebuild.sh` and redeploy.
+Free-tier services sleep after ~15 min idle; the first request after that takes
+~50s to wake.
+
+### Hugging Face Spaces
+
+`scripts/deploy_hf.py` is written and working, but **Docker and Gradio Spaces now
+require a PRO subscription** — only Static Spaces are free, and a static Space
+cannot run this backend. If you have PRO:
+
+```bash
+export HF_TOKEN=hf_...
+python scripts/deploy_hf.py --space <user>/sponsorship-radar
+```
+
+It uploads over HF's HTTP API, so git-lfs isn't needed for the ~85MB database,
+and sets the LLM key as a Space secret.
+
+### Data
+
+Baked into the image (85MB DuckDB + 18MB vectors, read-only) — no database
+service to run. To refresh, re-run `scripts/rebuild.sh` and redeploy.
+
+## Rebuilding after a data refresh
+
+```bash
+./scripts/download.sh              # new quarters land ~6 weeks after quarter end
+./.venv/bin/python ingest/build.py
+./.venv/bin/python ingest/rollup.py
+./.venv/bin/python ingest/embed_openai.py   # ~8 min, ~$0.20, resumable
+./.venv/bin/python ingest/embed.py --cards-only   # verifies cards match vectors
+./.venv/bin/python ingest/pack.py
+./.venv/bin/python scripts/validate.py
+```
+
+The `--cards-only` check refuses to proceed if any card text drifted from what
+was embedded — worth keeping, since it caught a real determinism bug where tied
+`string_agg` ordering silently changed 10,070 cards between identical runs.

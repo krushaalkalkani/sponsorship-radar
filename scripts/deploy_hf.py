@@ -3,7 +3,7 @@
 Uploads over the HTTP API, so git-lfs is not required even though the DuckDB
 file is ~79MB.
 
-  export HF_TOKEN=hf_...            # needs 'write' permission
+  export HF_TOKEN=hf_...            # needs write permission; Docker Spaces require HF PRO
   python scripts/deploy_hf.py --space krushalkalkani/sponsorship-radar
 
 Set the LLM key as a Space *secret* afterwards (or pass --openai-key):
