@@ -59,6 +59,34 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
   <h1>H-1B Sponsorship Radar</h1>
   <div class="sub" id="stats">loading…</div>
 
+  <div class="card" id="profbar" style="padding:12px 14px">
+    <div class="row" style="margin:0;align-items:baseline">
+      <b class="small">Your profile</b>
+      <span class="small muted" id="profsum">not set — set it once and every search is filtered to you</span>
+      <span style="flex:1"></span>
+      <button id="profedit" class="small" style="cursor:pointer">Edit</button>
+    </div>
+    <div id="proffields" hidden style="margin-top:10px">
+      <div class="row">
+        <input class="grow" id="p_role" placeholder="Target role, e.g. Data Scientist">
+        <input id="p_state" placeholder="State" style="width:90px" maxlength="2">
+        <input id="p_city" placeholder="City" style="width:120px">
+        <input id="p_wage" type="number" placeholder="Min $" style="width:105px">
+      </div>
+      <div class="row">
+        <select id="p_degree">
+          <option value="">Degree (any)</option>
+          <option>Bachelor's</option><option>Master's</option><option>PhD</option>
+        </select>
+        <label class="small"><input type="checkbox" id="p_missedcap"> I missed the H-1B cap — prioritise cap-exempt</label>
+        <label class="small"><input type="checkbox" id="p_nostaff"> Avoid staffing firms</label>
+        <button class="go" id="profsave">Save</button>
+        <button id="profclear" style="cursor:pointer">Clear</button>
+      </div>
+      <div class="small muted">Stored only in this browser. Never sent anywhere except as filters on your own searches.</div>
+    </div>
+  </div>
+
   <div class="tabs">
     <button class="tab on" data-p="company">Company check</button>
     <button class="tab" data-p="shortlist">Build a target list</button>
@@ -138,6 +166,44 @@ fetch("/api/stats").then(r=>r.json()).then(s=>{
     + (s.agent_enabled?"":` · <span class="err">agent off (no API key)</span>`);
 });
 
+// ---------- profile ----------
+const PKEY="radar_profile";
+function loadProfile(){ try{ return JSON.parse(localStorage.getItem(PKEY)||"{}"); }catch(e){ return {}; } }
+function saveProfile(p){ try{ localStorage.setItem(PKEY, JSON.stringify(p)); }catch(e){} }
+function profileSummary(p){
+  const bits=[];
+  if(p.role) bits.push(esc(p.role));
+  if(p.city||p.state) bits.push(esc([p.city,p.state].filter(Boolean).join(", ")));
+  if(p.wage) bits.push("≥ "+money(p.wage));
+  if(p.degree) bits.push(esc(p.degree));
+  if(p.missedcap) bits.push("cap-exempt priority");
+  if(p.nostaff) bits.push("no staffing firms");
+  return bits.length? bits.join(" · ") : "not set — set it once and every search is filtered to you";
+}
+function renderProfile(){
+  const p=loadProfile();
+  $("#profsum").innerHTML=profileSummary(p);
+  $("#p_role").value=p.role||""; $("#p_state").value=p.state||""; $("#p_city").value=p.city||"";
+  $("#p_wage").value=p.wage||""; $("#p_degree").value=p.degree||"";
+  $("#p_missedcap").checked=!!p.missedcap; $("#p_nostaff").checked=!!p.nostaff;
+  // seed the shortlist form from the profile
+  if(p.role&&!$("#srole").value) $("#srole").value=p.role;
+  if(p.state&&!$("#sstate").value) $("#sstate").value=p.state;
+  if(p.city&&!$("#scity").value) $("#scity").value=p.city;
+  if(p.wage&&!$("#swage").value) $("#swage").value=p.wage;
+  if(p.missedcap) $("#sexempt").checked=true;
+  if(p.nostaff) $("#sstaff").checked=true;
+}
+$("#profedit").onclick=()=>{ $("#proffields").hidden=!$("#proffields").hidden; };
+$("#profsave").onclick=()=>{
+  saveProfile({role:$("#p_role").value.trim(), state:$("#p_state").value.trim().toUpperCase(),
+    city:$("#p_city").value.trim(), wage:$("#p_wage").value, degree:$("#p_degree").value,
+    missedcap:$("#p_missedcap").checked, nostaff:$("#p_nostaff").checked});
+  renderProfile(); $("#proffields").hidden=true;
+};
+$("#profclear").onclick=()=>{ try{localStorage.removeItem(PKEY);}catch(e){} renderProfile(); };
+renderProfile();
+
 // ---------- company ----------
 function signalChips(e){
   let c="";
@@ -149,6 +215,19 @@ function signalChips(e){
   if(e.last_fy>=2026) c+=`<span class="chip good">Filed in the latest quarter</span>`;
   else if(e.last_fy<2025) c+=`<span class="chip warn">Nothing since FY${e.last_fy}</span>`;
   return c;
+}
+const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function monthChart(ms){
+  if(!ms||!ms.length) return "";
+  const by={}; ms.forEach(m=>by[m.month]=m.filings);
+  const mx=Math.max(1,...ms.map(m=>m.filings));
+  return `<div style="margin-top:10px"><div class="small muted" style="margin-bottom:4px">Filings by month (Jan–Mar is cap-lottery prep)</div>
+    <div style="display:flex;gap:3px;align-items:flex-end;height:44px">
+    ${MON.map((n,i)=>{const v=by[i+1]||0;const h=Math.max(2,Math.round(40*v/mx));
+      return `<div style="flex:1;text-align:center" title="${n}: ${fmt(v)} filings">
+        <div style="height:${h}px;background:${i<3?"var(--accent)":"var(--line)"};border-radius:2px"></div>
+        <div style="font-size:9px;color:var(--muted);margin-top:2px">${n[0]}</div></div>`;}).join("")}
+    </div></div>`;
 }
 function verdict(e){
   const ro=e.recent_outside||0;
@@ -192,6 +271,15 @@ async function checkCompany(){
     </table>
   </div>
   <div class="card">
+    <b class="small">When you need to apply</b>
+    <p class="verdict" style="font-size:17px;margin:6px 0 4px;color:${e.timing.track==="cap-exempt"?"var(--good)":e.timing.track==="transfer-heavy"?"var(--warn)":"var(--ink)"}">${esc(e.timing.headline)}</p>
+    <div class="small">${esc(e.timing.detail)}</div>
+    <div class="small" style="margin-top:6px"><b>Timing:</b> ${esc(e.timing.apply_by)}</div>
+    ${monthChart(e.filing_months)}
+    <div class="note small muted" style="margin-top:8px">Next cap: FY2028 registration ~March 2027.
+      Cap-subject jobs start the following Oct 1.</div>
+  </div>
+  <div class="card">
     <b class="small">Roles they sponsor</b>
     <table style="margin-top:8px"><tr><th>Occupation</th><th>Example title</th><th class="n">Filings</th><th class="n">Median wage</th></tr>
     ${(e.top_roles||[]).map(r=>`<tr><td>${esc(r.soc_title)}</td><td class="muted">${esc(r.example_title||"")}</td>
@@ -213,17 +301,19 @@ let lastRows=[], sortKey=null, sortDir=-1;
 function renderRows(){
   const rows=lastRows;
   if(!rows.length){ $("#sout").innerHTML=`<div class="card">Nothing matched. Loosen a filter — role words must appear in the job or occupation title.</div>`; return; }
-  const cols=[["display_name","Employer",0],["hq_state","State",0],
-    ["role_outside_hires","Outside hires (role)",1],["recent_outside","Outside hires (all)",1],
-    ["wage_median","Median wage",1],["perm_certified","Green cards",1],["score","Score",1]];
-  $("#sout").innerHTML=`<div class="card small muted">${rows.length} employers · outside hires = positions open to someone not already employed there</div>
+  const cols=[["display_name","Employer",0],["hq_state","HQ",0],
+    ["match_outside_hires","Outside hires (matching)",1],["match_wage","Median wage (matching)",1],
+    ["match_filings","Filings (matching)",1],["recent_outside","Outside hires (all)",1],
+    ["perm_certified","Green cards",1],["score","Score",1]];
+  $("#sout").innerHTML=`<div class="card small muted">${rows.length} employers · <b>matching</b> columns count only filings that match your role/location filters, from FY2025 onward · outside hires = positions open to someone not already employed there</div>
   <div class="card"><table><tr>${cols.map(c=>`<th class="${c[2]?"n":""}" data-k="${c[0]}">${c[1]}</th>`).join("")}<th>Signals</th></tr>
   ${rows.map(r=>`<tr>
     <td><span class="ex" onclick="document.querySelectorAll('.tab')[0].click();document.querySelector('#cq').value=${JSON.stringify(r.display_name)};checkCompany()">${esc(r.display_name)}</span></td>
     <td>${esc(r.hq_state||"")}</td>
-    <td class="n">${fmt(r.role_outside_hires)}</td>
+    <td class="n">${fmt(r.match_outside_hires)}</td>
+    <td class="n">${money(r.match_wage)}</td>
+    <td class="n">${fmt(r.match_filings)}</td>
     <td class="n">${fmt(r.recent_outside)}</td>
-    <td class="n">${money(r.wage_median)}</td>
     <td class="n">${fmt(r.perm_certified)}</td>
     <td class="n">${r.score??"—"}</td>
     <td class="small">${r.cap_exempt_likely?'<span class="chip good">cap-exempt</span>':""}${r.h1b_dependent==="Yes"?'<span class="chip warn">staffing</span>':""}${r.willful_violator?'<span class="chip bad">violator</span>':""}</td>
@@ -256,8 +346,10 @@ async function askAgent(){
   $("#abtn").disabled=true;
   $("#aout").innerHTML=`<div class="card"><span class="spin"></span> the agent is querying the data…</div>`;
   try{
+    const p=loadProfile();
+    const hasProfile=Object.values(p).some(v=>v!==""&&v!==false&&v!=null);
     const r=await (await fetch("/api/ask",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({question:q})})).json();
+      body:JSON.stringify({question:q, profile:hasProfile?p:null})})).json();
     $("#aout").innerHTML = r.error
       ? `<div class="card err">${esc(r.error)}</div>`
       : `<div class="card"><div class="ans">${esc(r.answer)}</div>

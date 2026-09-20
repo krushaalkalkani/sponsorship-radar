@@ -1,3 +1,15 @@
+---
+title: H-1B Sponsorship Radar
+emoji: 🎯
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+license: mit
+short_description: Which US employers actually sponsor H-1B, from real DOL data
+---
+
 # H-1B Sponsorship Radar
 
 Answers one question fast, from real government data: **will this company sponsor me?**
@@ -19,6 +31,10 @@ to, with staffing firms filterable out and cap-exempt employers filterable in.
 **Ask** — natural language over the whole dataset, answered by a LangGraph agent that
 queries the data and shows which tools it called.
 
+**Your profile** — set your target role, location, salary floor and whether you missed
+the cap once; every shortlist is pre-filtered and every agent answer is tailored to it.
+Stored in your browser only.
+
 ## The distinction that makes it useful
 
 Most H-1B lookup sites report *total filings*. That number is misleading. A DOL filing is
@@ -31,6 +47,13 @@ either:
 
 An employer with 4,000 renewals and 3 outside hires looks like a top sponsor on every other
 site and is a dead end in practice. This tool leads with outside hires everywhere.
+
+**When you need to apply.** Cap-subject H-1B jobs start on Oct 1, because the petition
+is filed in April after the March lottery. So the share of an employer's jobs that begin
+on Oct 1 tells you whether they run candidates through the lottery — and therefore
+whether you need an offer from them by January. The data separates cleanly:
+cap-exempt employers show **3%** Oct-1 starts, cap-subject ones **24%**. Every company
+page states which track the employer is on and when to be in their pipeline.
 
 Two other signals it surfaces that matter and are rarely shown:
 
@@ -49,6 +72,10 @@ Two other signals it surfaces that matter and are rarely shown:
   petition, which is not in this dataset.
 - **FY2026 contains Q1 only** (Oct–Dec 2025). The app labels it; don't compare it to a
   full year.
+- **Only certified filings count** toward sponsorship signals. Denied and withdrawn
+  filings are reported separately as a denial rate. This matters more than it sounds:
+  before the fix, an employer whose filings were 100% denied ranked 9th in the country
+  by outside hires.
 - Employers are keyed on normalized legal name. `Amazon.com Services LLC` and
   `Amazon Web Services, Inc.` stay separate because they genuinely are. Search surfaces
   related entities rather than silently merging them. (FEIN looked like a better key until
@@ -61,6 +88,9 @@ Two other signals it surfaces that matter and are rarely shown:
 |---|---|---|
 | DOL LCA (H-1B/E-3/H-1B1) disclosure | FY2023 Q1 – FY2026 Q1 | 1,885,316 cases |
 | DOL PERM (green card) disclosure | FY2024 – FY2026 Q1 | 257,472 cases |
+
+Employer rollups are computed from every case. The per-case tables that ship in the
+container are windowed to FY2025+ to keep the image small (see `ingest/pack.py`).
 
 Two things worth knowing if you extend this, both of which cost me time:
 
@@ -87,6 +117,9 @@ The agent is tool-bound and told never to state a number it didn't get from a to
 is what stops it inventing sponsorship statistics. The read-only SQL tool is the escape
 hatch for questions the fixed tools don't cover ("who grew the most FY24→FY25").
 
+**Provider-agnostic**: whichever key is present wins — `OPENAI_API_KEY`,
+`GOOGLE_API_KEY` or `ANTHROPIC_API_KEY`. Override the model with `RADAR_MODEL`.
+
 **Retrieval is hybrid on purpose.** Structured filters (role/state/wage) go to SQL because
 they're exact; open-ended descriptions ("biotech startups in San Diego") go to the vector
 store. At ~53k employer cards a brute-force int8 cosine scan takes ~5ms, so there is no ANN
@@ -112,13 +145,17 @@ It's a ranking heuristic, not a probability. Don't read it as odds.
 
 ```bash
 python -m venv .venv && ./.venv/bin/pip install -r requirements.txt
-./scripts/rebuild.sh      # downloads ~1.4GB, builds everything (~20 min)
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
-./scripts/run.sh          # http://127.0.0.1:8000
+./scripts/rebuild.sh          # downloads ~1.4GB, builds everything (~30 min)
+echo "OPENAI_API_KEY=sk-..." > .env
+./scripts/run.sh              # http://127.0.0.1:8000
+./.venv/bin/python scripts/validate.py   # 24 sanity checks on the build
 ```
 
 The data endpoints need no API key. Only `/api/ask` does, and it fails with a clear
 message rather than breaking the page.
+
+`ingest/embed.py --cards-only` rebuilds the profile-card table without re-running the
+~25 minute embed; it refuses if the card text actually changed (verified by hash).
 
 ## API
 
@@ -132,8 +169,16 @@ message rather than breaking the page.
 
 ## Deploy
 
-`render.yaml` + `Dockerfile` are set up for Render. The free tier doesn't have the RAM for
-the embedding model, so it targets `starter`. Set `ANTHROPIC_API_KEY` in the dashboard.
+Ships to Hugging Face Spaces (Docker SDK):
 
-Data is baked into the image (~270MB DuckDB, read-only), so there's no database service to
-run. To refresh, re-run `scripts/rebuild.sh` and redeploy.
+```bash
+export HF_TOKEN=hf_...     # write-scoped
+./.venv/bin/python scripts/deploy_hf.py --space <user>/sponsorship-radar
+```
+
+Uploads over HF's HTTP API, so git-lfs isn't needed for the 79MB database. The LLM key
+is set as a Space *secret*, never committed. Spaces gives 16GB RAM, which matters —
+the embedding model pushes runtime memory to ~650MB, above Render's 512MB free tier.
+
+Data is baked into the image (79MB DuckDB + 14MB vectors, read-only), so there is no
+database service to run. To refresh, re-run `scripts/rebuild.sh` and redeploy.

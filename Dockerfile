@@ -1,13 +1,20 @@
 FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 PORT=8000
+
 WORKDIR /srv
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --upgrade pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# Pre-download the embedding model so the first request isn't slow.
-RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"
+
 COPY app ./app
 COPY ingest ./ingest
-COPY data/build ./data/build
-ENV PORT=8000
+COPY scripts ./scripts
+# Read-only data, baked in: no database service and no artifact hosting needed.
+COPY data/build/radar_serve.duckdb data/build/vectors_openai.npz ./data/build/
+
+RUN useradd -m -u 1000 user && chown -R 1000:1000 /srv
+USER 1000
+
 EXPOSE 8000
 CMD ["sh","-c","uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

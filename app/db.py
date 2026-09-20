@@ -7,8 +7,13 @@ answer must cite.
 import duckdb, os, re, numpy as np, threading
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB = os.path.join(ROOT, "data", "build", "radar.duckdb")
-VEC = os.path.join(ROOT, "data", "build", "vectors.npz")
+_BUILD = os.path.join(ROOT, "data", "build")
+# Prefer the slim serving DB (what ships in the image); fall back to the full build.
+DB = next((p for p in (os.path.join(_BUILD, "radar_serve.duckdb"),
+                       os.path.join(_BUILD, "radar.duckdb")) if os.path.exists(p)),
+          os.path.join(_BUILD, "radar_serve.duckdb"))
+VEC_LOCAL = os.path.join(_BUILD, "vectors.npz")           # fastembed / BAAI bge-small
+VEC_OPENAI = os.path.join(_BUILD, "vectors_openai.npz")   # OpenAI text-embedding-3-small
 
 _local = threading.local()
 CURRENT_FY, LATEST_QUARTER = 2026, "FY2026 Q1 (Oct-Dec 2025)"
@@ -75,6 +80,9 @@ def employer_profile(name_or_key):
     e["top_locations"] = _rows("""SELECT city, state, filings, outside_hires,
         round(median_wage) median_wage FROM employer_location
         WHERE employer_key=? ORDER BY filings DESC LIMIT 10""", [key])
+    e["filing_months"] = _rows("""SELECT month, filings FROM employer_month
+        WHERE employer_key=? ORDER BY month""", [key])
+    e["timing"] = lottery_timing(e)
     c = _rows("SELECT card FROM employer_card WHERE employer_key=?", [key])
     e["card"] = c[0]["card"] if c else None
     e["found"] = True
@@ -82,62 +90,111 @@ def employer_profile(name_or_key):
     return e
 
 
+def lottery_timing(e):
+    """Translate filing seasonality into 'when do I need to apply'.
+
+    Cap-subject H-1B employment starts Oct 1, because the petition is filed in the
+    April window after the March lottery. An employer with a high share of Oct-1
+    start dates is running candidates through that lottery, so a student has to be
+    in their pipeline months earlier. Cap-exempt employers (universities,
+    hospitals) file year-round - measured oct1_share ~3% vs ~24% cap-subject.
+    """
+    oct1 = e.get("oct1_share") or 0
+    capx = bool(e.get("cap_exempt_likely"))
+    if capx:
+        return {"track": "cap-exempt", "oct1_share": round(oct1, 3),
+                "headline": "Can sponsor year-round - no lottery needed",
+                "detail": "As a university or hospital this employer is likely cap-exempt, "
+                          "so it can file an H-1B at any point in the year. If you missed "
+                          "the March cap, this is the kind of employer that can still hire you.",
+                "apply_by": "Any time - hiring is not tied to the lottery calendar."}
+    if oct1 >= 0.20:
+        return {"track": "cap-heavy", "oct1_share": round(oct1, 3),
+                "headline": "Runs candidates through the March lottery",
+                "detail": "%.0f%% of this employer's H-1B jobs start on Oct 1, the cap-subject "
+                          "start date. They hire, then register you in the March lottery." % (oct1 * 100),
+                "apply_by": "Be in their pipeline by January - offers need to land before "
+                            "the March registration window."}
+    if oct1 >= 0.05:
+        return {"track": "mixed", "oct1_share": round(oct1, 3),
+                "headline": "Mix of lottery hires and transfers",
+                "detail": "%.0f%% of jobs start Oct 1 (cap-subject); the rest are transfers "
+                          "and extensions that can happen any time." % (oct1 * 100),
+                "apply_by": "Apply any time, but aim for January if you need the cap."}
+    return {"track": "transfer-heavy", "oct1_share": round(oct1, 3),
+            "headline": "Mostly hires people who already hold H-1B",
+            "detail": "Only %.0f%% of jobs start Oct 1, so this employer mainly transfers in "
+                      "workers who already have status rather than running the lottery." % (oct1 * 100),
+            "apply_by": "Strongest fit if you already hold H-1B; weaker odds straight from OPT."}
+
+
 # ---------------------------------------------------------------- search
 def search_employers(role=None, state=None, city=None, min_wage=None, cap_exempt=None,
                      exclude_dependent=False, min_outside_hires=1, active_since=2025,
                      sort="score", limit=25):
-    """Structured shortlist: which employers sponsor <role> in <state> above <wage>.
+    """Ranked shortlist of employers to apply to.
 
-    Params are appended in the same order the placeholders appear in the SQL text,
-    since DuckDB binds positionally.
+    Metrics are computed from the per-case table with the caller's filters already
+    applied, so `match_outside_hires` and `match_wage` describe *that role in that
+    place* - not the employer's global totals. Aggregating the rollup tables instead
+    would return, say, Netflix for a Massachusetts search because it has some MA
+    worksite, and then show its company-wide numbers next to it.
+
+    Per-case rows are FY2025+ (see ingest/pack.py), so a shortlist is inherently
+    "who is hiring recently", which is what a job search wants.
     """
-    params, joins, extra = [], "", ""
-
+    conds = ["case_status ILIKE 'Certified%'"]
+    params = []
     if role:
         like = "%" + role.strip() + "%"
-        joins += (" JOIN (SELECT employer_key, sum(filings) rf, sum(outside_hires) ro,"
-                  " median(median_wage) rw, max(example_title) ex FROM employer_role"
-                  " WHERE soc_title ILIKE ? OR example_title ILIKE ? GROUP BY 1) r"
-                  " ON r.employer_key = e.employer_key")
+        conds.append("(job_title ILIKE ? OR soc_title ILIKE ?)")
         params += [like, like]
-        extra += (", r.rf role_filings, r.ro role_outside_hires,"
-                  " round(r.rw) role_median_wage, r.ex example_title")
+    if state:
+        conds.append("worksite_state = ?"); params.append(state.strip().upper())
+    if city:
+        conds.append("worksite_city ILIKE ?"); params.append("%" + city.strip() + "%")
 
-    if state or city:
-        conds, lp = [], []
-        if state:
-            conds.append("state = ?"); lp.append(state.strip().upper())
-        if city:
-            conds.append("city ILIKE ?"); lp.append("%" + city.strip() + "%")
-        joins += (" JOIN (SELECT employer_key, sum(filings) lf, sum(outside_hires) lo"
-                  " FROM employer_location WHERE %s GROUP BY 1) g"
-                  " ON g.employer_key = e.employer_key" % " AND ".join(conds))
-        params += lp
-        extra += ", g.lf location_filings, g.lo location_outside_hires"
-
-    where = ["e.last_fy >= ?", "coalesce(e.recent_outside,0) >= ?"]
-    params += [active_since, min_outside_hires]
+    having, hparams = ["f.outside_hires >= ?"], [min_outside_hires]
     if min_wage:
-        where.append("coalesce(e.wage_median,0) >= ?"); params.append(min_wage)
+        having.append("f.match_wage >= ?"); hparams.append(min_wage)
+
+    ewhere = ["e.last_fy >= ?"]
+    eparams = [active_since]
     if cap_exempt is True:
-        where.append("e.cap_exempt_likely")
+        ewhere.append("e.cap_exempt_likely")
     elif cap_exempt is False:
-        where.append("NOT e.cap_exempt_likely")
+        ewhere.append("NOT e.cap_exempt_likely")
     if exclude_dependent:
-        where.append("coalesce(e.h1b_dependent,'No') <> 'Yes'")
+        ewhere.append("coalesce(e.h1b_dependent,'No') <> 'Yes'")
 
-    order = {"score": "e.score DESC", "volume": "e.recent_outside DESC",
-             "wage": "e.wage_median DESC NULLS LAST",
-             "recent": "e.last_fy DESC, e.score DESC"}.get(sort, "e.score DESC")
+    # "best bet" balances how many matching openings there are against employer
+    # quality, so a 1-hire company can't outrank a 100-hire one on score alone.
+    order = {"score": "(ln(1 + f.outside_hires) * e.score) DESC",
+             "volume": "f.outside_hires DESC",
+             "wage": "f.match_wage DESC NULLS LAST",
+             "recent": "f.last_year DESC, e.score DESC"}.get(sort, "e.score DESC")
 
-    sql = ("SELECT e.display_name, e.employer_key, e.hq_city, e.hq_state,"
-           " e.lca_total, e.recent_filings, e.recent_outside, round(e.wage_median) wage_median,"
-           " e.perm_certified, e.cap_exempt_likely, e.h1b_dependent, e.willful_violator,"
-           " e.last_fy, e.score" + extra +
-           " FROM employers e" + joins + " WHERE " + " AND ".join(where) +
-           " ORDER BY " + order + " LIMIT ?")
-    params.append(limit)
-    return _rows(sql, params)
+    sql = """
+    WITH f AS (
+        SELECT employer_key,
+               count(*) AS match_filings,
+               sum(coalesce(new_employment,0) + coalesce(change_employer,0)) AS outside_hires,
+               median(CASE WHEN wage_from BETWEEN 10000 AND 5000000 THEN wage_from END) AS match_wage,
+               max(fy_year) AS last_year,
+               mode(job_title) AS example_title
+        FROM lca WHERE %s GROUP BY 1)
+    SELECT e.display_name, e.employer_key, e.hq_city, e.hq_state,
+           e.lca_total, e.recent_filings, e.recent_outside,
+           round(e.wage_median) AS wage_median,
+           e.perm_certified, e.cap_exempt_likely, e.h1b_dependent, e.willful_violator,
+           e.last_fy, e.score,
+           f.match_filings, f.outside_hires AS match_outside_hires,
+           round(f.match_wage) AS match_wage, f.example_title, f.last_year
+    FROM f JOIN employers e USING (employer_key)
+    WHERE %s AND %s
+    ORDER BY %s LIMIT ?""" % (" AND ".join(conds), " AND ".join(having),
+                              " AND ".join(ewhere), order)
+    return _rows(sql, params + hparams + eparams + [limit])
 
 
 def compare_employers(names):
@@ -146,30 +203,78 @@ def compare_employers(names):
 
 # ---------------------------------------------------------------- semantic
 class VectorStore:
-    """int8-quantized cosine store over employer profile cards."""
+    """int8-quantized cosine store over employer profile cards.
+
+    Two interchangeable backends, chosen by which vector file shipped:
+
+      openai  - query embedded through the API. ~190MB resident, so it fits a
+                512MB free-tier container. Needs OPENAI_API_KEY.
+      local   - fastembed ONNX model in-process. No API key and works offline,
+                but ~440MB extra resident memory.
+
+    The backend is recorded inside the .npz, so a query can never be embedded
+    with a different model than the stored vectors - that would silently return
+    plausible-looking nonsense rather than failing.
+    """
+
     def __init__(self):
-        self.ok = False
-        try:
-            z = np.load(VEC, allow_pickle=False)
-            self.v = z["vecs"].astype(np.float32) / 127.0
+        self.ok, self.err, self.model, self.backend = False, None, None, None
+        prefer = os.environ.get("RADAR_EMBED", "auto")
+        paths = []
+        if prefer in ("auto", "openai"):
+            paths.append(VEC_OPENAI)
+        if prefer in ("auto", "local"):
+            paths.append(VEC_LOCAL)
+        for path in paths:
+            if not os.path.exists(path):
+                continue
+            try:
+                z = np.load(path, allow_pickle=False)
+            except Exception as e:
+                self.err = str(e)
+                continue
+            backend = str(z["backend"]) if "backend" in z.files else "local"
+            if backend.startswith("openai") and not os.environ.get("OPENAI_API_KEY"):
+                self.err = "openai vectors present but OPENAI_API_KEY is not set"
+                continue
+            # Kept as int8 (~27MB). Expanding to float32 up front costs ~215MB,
+            # which is most of a 512MB container; search() upcasts in chunks instead.
+            self.v = z["vecs"]
             self.keys = z["keys"]
-            self.model = None
+            self.backend = backend
+            self.path = path
             self.ok = True
-        except Exception as e:
-            self.err = str(e)
+            return
+        if not self.err:
+            self.err = "no vector file found (run ingest/embed.py or embed_openai.py)"
 
     def _embed(self, text):
-        if self.model is None:
-            from fastembed import TextEmbedding
-            self.model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        q = np.array(list(self.model.embed([text]))[0], dtype=np.float32)
+        if self.backend.startswith("openai"):
+            _, model, dims = self.backend.split(":")
+            from openai import OpenAI
+            r = OpenAI(api_key=os.environ["OPENAI_API_KEY"]).embeddings.create(
+                model=model, input=[text], dimensions=int(dims))
+            q = np.array(r.data[0].embedding, dtype=np.float32)
+        else:
+            if self.model is None:
+                from fastembed import TextEmbedding
+                self.model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+            q = np.array(list(self.model.embed([text]))[0], dtype=np.float32)
         return q / (np.linalg.norm(q) + 1e-9)
+
+    CHUNK = 8192
 
     def search(self, text, k=10):
         if not self.ok:
             return []
-        sims = self.v @ self._embed(text)
-        idx = np.argpartition(-sims, min(k, len(sims) - 1))[:k]
+        q = self._embed(text)
+        n = self.v.shape[0]
+        sims = np.empty(n, dtype=np.float32)
+        for i in range(0, n, self.CHUNK):
+            block = self.v[i:i + self.CHUNK]
+            sims[i:i + self.CHUNK] = (block.astype(np.float32) / 127.0) @ q
+        k = min(k, n)
+        idx = np.argpartition(-sims, k - 1)[:k]
         idx = idx[np.argsort(-sims[idx])]
         return [(str(self.keys[i]), float(sims[i])) for i in idx]
 
@@ -227,10 +332,19 @@ def schema():
 
 
 def stats():
-    r = _rows("""SELECT (SELECT count(*) FROM lca) lca_cases,
-        (SELECT count(*) FROM perm) perm_cases,
-        (SELECT count(*) FROM employers) employers,
-        (SELECT count(*) FROM employers WHERE last_fy>=2025 AND recent_outside>=5) actionable,
-        (SELECT max(decision_date) FROM lca) latest""")[0]
+    r = _rows("""SELECT (SELECT count(*) FROM employers) employers,
+        (SELECT count(*) FROM employers WHERE last_fy>=2025 AND recent_outside>=5) actionable""")[0]
+    try:
+        m = _rows("SELECT * FROM meta")[0]
+        r["lca_cases"] = m["lca_cases_total"]
+        r["perm_cases"] = m["perm_cases_total"]
+        r["lca_cases_percase"] = m["lca_cases_percase"]
+        r["percase_from_fy"] = m["percase_from_fy"]
+        r["latest"] = m["last_date"]
+        r["first"] = m["first_date"]
+    except Exception:
+        r["lca_cases"] = _rows("SELECT count(*) n FROM lca")[0]["n"]
+        r["perm_cases"] = _rows("SELECT count(*) n FROM perm")[0]["n"]
+        r["latest"] = _rows("SELECT max(decision_date) d FROM lca")[0]["d"]
     r["latest_quarter"] = LATEST_QUARTER
     return r

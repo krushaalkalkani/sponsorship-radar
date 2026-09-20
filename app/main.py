@@ -19,8 +19,15 @@ app = FastAPI(title="H-1B Sponsorship Radar", version="1.0")
 @app.get("/api/stats")
 def api_stats():
     s = db.stats()
-    s["agent_enabled"] = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    s["semantic_enabled"] = db.store().ok
+    from .agent import available, PROVIDER, MODEL
+    s["agent_enabled"] = available()
+    s["agent_provider"] = PROVIDER
+    s["agent_model"] = MODEL if available() else None
+    st = db.store()
+    s["semantic_enabled"] = st.ok
+    s["semantic_backend"] = st.backend
+    if not st.ok:
+        s["semantic_error"] = st.err
     return s
 
 
@@ -54,16 +61,19 @@ def api_semantic(q: str, k: int = 10):
 class Ask(BaseModel):
     question: str
     history: Optional[List[dict]] = None
+    profile: Optional[dict] = None
 
 
 @app.post("/api/ask")
 def api_ask(body: Ask):
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return JSONResponse({"error": "Agent disabled: set ANTHROPIC_API_KEY. "
-                                      "Company lookup and shortlist still work."}, 503)
+    from .agent import available
+    if not available():
+        return JSONResponse({"error": "Agent disabled: set OPENAI_API_KEY (or GOOGLE_API_KEY / "
+                                      "ANTHROPIC_API_KEY). Company lookup and "
+                                      "shortlist still work."}, 503)
     try:
         from .agent import ask
-        return ask(body.question)
+        return ask(body.question, profile=body.profile)
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"error": "%s: %s" % (type(e).__name__, e)}, 500)

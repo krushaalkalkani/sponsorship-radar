@@ -4,8 +4,13 @@ uvicorn[standard]
 pydantic
 numpy
 rapidfuzz
-fastembed
+openai
 langgraph
 langchain-core
+langchain-openai
+# optional alternate LLM providers (agent auto-detects whichever key is set)
 langchain-anthropic
-anthropic
+langchain-google-genai
+# NOTE: fastembed is NOT required at runtime. It is only needed to regenerate
+# local offline vectors with ingest/embed.py; deploys use the OpenAI embeddings
+# backend, which keeps the container ~400MB lighter in RAM.

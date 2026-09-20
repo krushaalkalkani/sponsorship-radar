@@ -5,3 +5,4 @@ __pycache__/
 .env
 data/build/radar.duckdb
 data/build/radar.duckdb.wal
+# full build DB stays local; only the slim serving DB + vectors ship

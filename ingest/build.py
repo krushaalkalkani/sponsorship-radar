@@ -64,7 +64,7 @@ def main():
 
     con.execute("""CREATE TABLE lca(
         fy VARCHAR, case_number VARCHAR, case_status VARCHAR, visa_class VARCHAR,
-        received_date DATE, decision_date DATE,
+        received_date DATE, decision_date DATE, begin_date DATE,
         employer_raw VARCHAR, employer_key VARCHAR, fein VARCHAR, naics VARCHAR,
         employer_city VARCHAR, employer_state VARCHAR,
         job_title VARCHAR, soc_code VARCHAR, soc_title VARCHAR,
@@ -80,7 +80,7 @@ def main():
         name = pick(c, "EMPLOYER_NAME")
         q = """INSERT INTO lca SELECT
             '%s', CASE_NUMBER, CASE_STATUS, %s,
-            %s, %s,
+            %s, %s, %s,
             trim(%s), %s, %s, %s,
             upper(trim(%s)), upper(trim(%s)),
             trim(%s), %s, trim(%s),
@@ -91,6 +91,7 @@ def main():
             FROM %s WHERE CASE_NUMBER IS NOT NULL""" % (
             fy, pick(c, "VISA_CLASS"),
             XLDATE.format(c=pick(c, "RECEIVED_DATE")), XLDATE.format(c=pick(c, "DECISION_DATE")),
+            XLDATE.format(c=pick(c, "BEGIN_DATE")),
             name, norm_sql(name), pick(c, "EMPLOYER_FEIN"), pick(c, "NAICS_CODE"),
             pick(c, "EMPLOYER_CITY"), pick(c, "EMPLOYER_STATE"),
             pick(c, "JOB_TITLE"), pick(c, "SOC_CODE"), pick(c, "SOC_TITLE"),

@@ -6,4 +6,5 @@ cd "$(dirname "$0")/.."
 ./.venv/bin/python ingest/build.py
 ./.venv/bin/python ingest/rollup.py
 ./.venv/bin/python ingest/embed.py
+./.venv/bin/python ingest/pack.py
 echo "rebuild complete"

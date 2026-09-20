@@ -16,7 +16,30 @@ from langgraph.graph.message import add_messages
 
 from . import db
 
-MODEL = os.environ.get("RADAR_MODEL", "claude-sonnet-4-5-20250929")
+# Provider-agnostic. Whichever key is present wins, so the same deployment runs
+# on OpenAI, Gemini or Anthropic without a code change.
+_PROVIDERS = [
+    ("openai",    ("OPENAI_API_KEY",),                  "gpt-5-mini"),
+    ("gemini",    ("GOOGLE_API_KEY", "GEMINI_API_KEY"), "gemini-2.5-flash"),
+    ("anthropic", ("ANTHROPIC_API_KEY",),               "claude-sonnet-4-5-20250929"),
+]
+
+
+def _detect():
+    forced = os.environ.get("RADAR_PROVIDER")
+    for name, envs, default in _PROVIDERS:
+        key = next((os.environ[e] for e in envs if os.environ.get(e)), None)
+        if forced == name or (not forced and key):
+            return name, key, os.environ.get("RADAR_MODEL") or default
+    return None, None, None
+
+
+PROVIDER, _KEY, MODEL = _detect()
+
+
+def available():
+    return PROVIDER is not None and _KEY is not None
+
 
 SYSTEM = """You are Sponsorship Radar, an assistant for international students (F-1/OPT)
 who need to know which US employers actually sponsor work visas.
@@ -42,6 +65,15 @@ Rules you must follow:
 5. FY2026 contains only Q1 (Oct-Dec 2025). Never compare a partial FY2026 against
    a full year without saying so.
 6. Be concrete and brief. Give numbers, then what to do about them.
+
+Tool choice:
+  - a named company            -> lookup_company
+  - several named companies    -> compare_companies
+  - role / place / pay filters -> shortlist_sponsors (cap_exempt=True if they
+                                  missed the lottery or ask about universities)
+  - a *kind* of company        -> semantic_search
+  - rankings, trends, anything -> query_data (read-only SQL)
+    the fixed tools can't express
 
 You cannot predict whether any individual will get a visa. You report employer behaviour."""
 
@@ -90,9 +122,16 @@ def compare_companies(names: List[str]) -> str:
 
 @tool
 def semantic_search(query: str, k: int = 10) -> str:
-    """Meaning-based search over employer profile cards. Use for open-ended or fuzzy
-    descriptions ('biotech startups in San Diego that sponsor', 'places hiring
-    quant researchers') where exact role/state filters are too rigid."""
+    """Meaning-based search over employer profile cards. Use ONLY for descriptions of
+    a *kind of company* that role/state filters cannot express - industry, size,
+    character ('biotech startups in San Diego', 'quant trading shops', 'climate
+    hardware companies').
+
+    Do NOT use this when the query is really a role plus a constraint ('ML engineers
+    at universities', 'data scientists in Boston paying over 150k') - embeddings
+    match on company names there and will return firms merely *named* after the
+    field. Use shortlist_sponsors for those, with cap_exempt=True for the
+    university/hospital case."""
     return json.dumps(db.semantic_search(query, k=min(k, 20)), default=str)
 
 
@@ -112,8 +151,15 @@ def query_data(sql: str) -> str:
         last_year, example_title)
       employer_location(employer_key, city, state, filings, outside_hires,
         median_wage, last_year)
-      lca(... per-case H-1B rows ...), perm(... per-case green card rows ...)
-    fy_year is the US federal fiscal year; FY2026 holds Q1 only."""
+      lca(employer_key, case_status, visa_class, decision_date, fy_year, job_title,
+        soc_title, worksite_city, worksite_state, positions, new_employment,
+        continued_employment, change_employer, wage_from, pw_level)
+      perm(employer_key, case_status, decision_date, fy_year, job_title, soc_title,
+        worksite_city, worksite_state, wage_from)
+    fy_year is the US federal fiscal year; FY2026 holds Q1 (Oct-Dec 2025) only.
+    IMPORTANT: employers/employer_year/employer_role/employer_location cover
+    FY2023-FY2026. The per-case lca and perm tables are windowed to FY2025+.
+    For anything spanning earlier years, use employer_year, not lca."""
     return json.dumps(db.run_sql(sql), default=str)
 
 
@@ -124,15 +170,30 @@ BY_NAME = {t.name: t for t in TOOLS}
 # ----------------------------------------------------------------- graph
 class State(TypedDict):
     messages: Annotated[list, add_messages]
+    system: str
 
 
 def _llm():
-    from langchain_anthropic import ChatAnthropic
-    return ChatAnthropic(model=MODEL, max_tokens=2000, temperature=0).bind_tools(TOOLS)
+    if PROVIDER == "openai":
+        from langchain_openai import ChatOpenAI
+        llm = ChatOpenAI(model=MODEL, api_key=_KEY, timeout=90)
+    elif PROVIDER == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        llm = ChatGoogleGenerativeAI(model=MODEL, temperature=0,
+                                     max_output_tokens=2000, google_api_key=_KEY)
+    elif PROVIDER == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        llm = ChatAnthropic(model=MODEL, max_tokens=2000, temperature=0,
+                            api_key=_KEY)
+    else:
+        raise RuntimeError("No LLM key set. Provide OPENAI_API_KEY, "
+                           "GOOGLE_API_KEY or ANTHROPIC_API_KEY.")
+    return llm.bind_tools(TOOLS)
 
 
 def agent_node(state: State):
-    return {"messages": [_llm().invoke([SystemMessage(content=SYSTEM)] + state["messages"])]}
+    sys_text = state.get("system") or SYSTEM
+    return {"messages": [_llm().invoke([SystemMessage(content=sys_text)] + state["messages"])]}
 
 
 def tool_node(state: State):
@@ -170,11 +231,40 @@ def graph():
     return _graph
 
 
-def ask(question, history=None, max_steps=8):
+def _profile_note(p):
+    """Turn the saved profile into a short instruction block.
+
+    Kept as guidance rather than a hard filter: a student asking about a specific
+    company still wants the answer about that company, not a silent rewrite of
+    their question into their saved preferences.
+    """
+    if not p:
+        return ""
+    bits = []
+    if p.get("role"):    bits.append("target role: %s" % p["role"])
+    if p.get("city") or p.get("state"):
+        bits.append("target location: %s" % ", ".join(x for x in (p.get("city"), p.get("state")) if x))
+    if p.get("wage"):    bits.append("minimum salary: $%s" % p["wage"])
+    if p.get("degree"):  bits.append("degree: %s" % p["degree"])
+    if p.get("missedcap"):
+        bits.append("MISSED the H-1B cap this year - cap-exempt employers "
+                    "(universities, hospitals) are especially relevant, and for "
+                    "cap-subject employers say when they would need to apply")
+    if p.get("nostaff"): bits.append("wants to avoid H-1B-dependent staffing firms")
+    if not bits:
+        return ""
+    return ("\n\nThe person you are answering has this profile:\n- " + "\n- ".join(bits) +
+            "\nUse it to fill in unstated filters and to tailor the recommendation. "
+            "If their question names something that conflicts with the profile, the "
+            "question wins.")
+
+
+def ask(question, history=None, max_steps=8, profile=None):
     """Run one question through the agent. Returns answer text + tool trace."""
+    sys_text = SYSTEM + _profile_note(profile)
     msgs = list(history or []) + [HumanMessage(content=question)]
     trace = []
-    state = {"messages": msgs}
+    state = {"messages": msgs, "system": sys_text}
     for _ in range(max_steps):
         state = graph().invoke(state, config={"recursion_limit": 25})
         break
